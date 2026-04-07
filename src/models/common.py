@@ -11,10 +11,12 @@ ALL_FEATURES = [
 
 
 def _prepare_data(train_df, test_df, feature_cols, label_col="label"):
-    """Extract feature arrays and labels. Missing values become 0."""
-    X_train = train_df[feature_cols].fillna(0).values
+    """Extract feature arrays and labels. Missing values filled with training median."""
+    train_features = train_df[feature_cols]
+    medians = train_features.median()
+    X_train = train_features.fillna(medians).values
     y_train = train_df[label_col].values
-    X_test = test_df[feature_cols].fillna(0).values
+    X_test = test_df[feature_cols].fillna(medians).values
     return X_train, y_train, X_test
 
 

@@ -1,9 +1,12 @@
 """Wraps the ML pipeline as callable functions for the API."""
 
+import logging
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 import matplotlib
 matplotlib.use("Agg")
@@ -18,8 +21,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.evaluation.metrics import evaluate_ranking
-from src.evaluation.portfolio import simulate_portfolio
 from src.models.common import MF_FEATURES
+from src.models.logistic import logistic_model_fn, ridge_logistic_model_fn
 from src.models.random_forest import detect_features, rf_model_fn
 from src.models.vanilla_mf import mf_model_fn
 from src.models.xgboost_model import xgb_model_fn
@@ -28,16 +31,21 @@ TOP_N = 30
 MIN_TRAIN_PERIODS = 4
 
 MODELS = [
-    ("MagicFormula", "A_MF_only",      MF_FEATURES, mf_model_fn),
-    ("RandomForest", "B_MF_only",      MF_FEATURES, rf_model_fn),
-    ("XGBoost",      "B_MF_only",      MF_FEATURES, xgb_model_fn),
-    ("RandomForest", "C_All_features", None,         rf_model_fn),
-    ("XGBoost",      "C_All_features", None,         xgb_model_fn),
+    ("MagicFormula",   "A_MF_only",      MF_FEATURES, mf_model_fn),
+    ("Logistic",       "B_MF_only",      MF_FEATURES, logistic_model_fn),
+    ("Ridge",          "B_MF_only",      MF_FEATURES, ridge_logistic_model_fn),
+    ("RandomForest",   "B_MF_only",      MF_FEATURES, rf_model_fn),
+    ("XGBoost",        "B_MF_only",      MF_FEATURES, xgb_model_fn),
+    ("Logistic",       "C_All_features", None,         logistic_model_fn),
+    ("Ridge",          "C_All_features", None,         ridge_logistic_model_fn),
+    ("RandomForest",   "C_All_features", None,         rf_model_fn),
+    ("XGBoost",        "C_All_features", None,         xgb_model_fn),
 ]
 
 METRIC_KEYS = [
     "accuracy", "precision", "recall", "f1", "roc_auc",
     "spearman_ic", "ndcg_at_k", "precision_at_k",
+    "mean_annual_return", "std_annual_return",
     "cagr", "sharpe", "max_drawdown",
 ]
 
@@ -45,6 +53,7 @@ METRIC_LABELS = {
     "accuracy": "Accuracy", "precision": "Precision", "recall": "Recall",
     "f1": "F1 Score", "roc_auc": "ROC AUC", "spearman_ic": "Spearman IC",
     "ndcg_at_k": "NDCG@30", "precision_at_k": "Precision@30",
+    "mean_annual_return": "Mean Ann. Return", "std_annual_return": "Std Ann. Return",
     "cagr": "CAGR", "sharpe": "Sharpe", "max_drawdown": "Max Drawdown",
 }
 
@@ -79,11 +88,12 @@ def _run_fold(fn, train_df, test_df, feature_cols, is_mf):
     m = evaluate_ranking(result, score_col="predicted_score",
                          return_col="forward_return_rank",
                          label_col="label", pred_label_col="predicted_label", k=TOP_N)
+    # Store the single-quarter portfolio return for later aggregation.
+    # Don't compute CAGR/Sharpe/Drawdown per-fold (meaningless for 1 quarter).
     if "forward_return" in result.columns:
-        port = simulate_portfolio(result, score_col="predicted_score",
-                                  return_col="forward_return", top_n=TOP_N)
-        for k in ("cagr", "sharpe", "max_drawdown"):
-            m[k] = port.get(k)
+        top = result.nlargest(min(TOP_N, len(result)), "predicted_score")
+        avg_ret = top["forward_return"].mean()
+        m["portfolio_return"] = float(avg_ret) if np.isfinite(avg_ret) else None
     return m, model
 
 
@@ -109,31 +119,71 @@ def _train_one_model(args):
             if on_progress:
                 on_progress(model_name, fs_name, i + 1, len(folds),
                             m.get("roc_auc", 0))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("%s (%s) fold %d failed: %s", model_name, fs_name, i + 1, e)
 
     fi = None
     if fs_name.startswith("C_") and last_model:
-        fi = {
-            "features": list(features),
-            "importances": last_model.feature_importances_.tolist(),
-        }
+        if hasattr(last_model, "feature_importances_"):
+            imp = last_model.feature_importances_.tolist()
+        elif hasattr(last_model, "coef_"):
+            imp = np.abs(last_model.coef_[0]).tolist()
+        else:
+            imp = None
+        if imp is not None:
+            fi = {"features": list(features), "importances": imp}
 
     avg = None
     if fold_metrics:
         mdf = pd.DataFrame(fold_metrics)
         avg = {"model": model_name, "feature_set": fs_name}
+        # Average classification/ranking metrics across folds.
+        # Skip portfolio metrics — they are computed separately below.
+        portfolio_keys = {"cagr", "sharpe", "max_drawdown",
+                          "mean_annual_return", "std_annual_return"}
         for k in METRIC_KEYS:
+            if k in portfolio_keys:
+                continue
             if k in mdf.columns:
                 vals = mdf[k].dropna()
                 vals = vals[np.isfinite(vals)]
                 avg[k] = round(float(vals.mean()), 6) if len(vals) > 0 else None
         avg["n_folds"] = len(fold_metrics)
 
+        # Portfolio metrics.  forward_return is a 12-month return, so each
+        # fold's portfolio_return is already annual-scale.  Consecutive folds
+        # overlap (~9 months), so we report simple stats from all folds and
+        # compute CAGR/Sharpe/Drawdown from non-overlapping Q1-only folds.
+        all_rets = [m["portfolio_return"] for m in fold_metrics
+                    if m.get("portfolio_return") is not None
+                    and np.isfinite(m["portfolio_return"])]
+        if len(all_rets) >= 2:
+            r = np.array(all_rets)
+            avg["mean_annual_return"] = round(float(np.mean(r)), 6)
+            avg["std_annual_return"] = round(float(np.std(r, ddof=1)), 6)
+
+        # Non-overlapping annual returns (Q1 folds only) for CAGR/Sharpe/Drawdown
+        q1_rets = [m["portfolio_return"] for m in fold_metrics
+                   if m.get("portfolio_return") is not None
+                   and m.get("quarter", "").endswith("Q1")
+                   and np.isfinite(m["portfolio_return"])]
+        if len(q1_rets) >= 2:
+            r_q1 = np.array(q1_rets)
+            avg["cagr"] = round(float(np.prod(1 + r_q1) ** (1 / len(r_q1)) - 1), 6)
+            q1_std = float(np.std(r_q1, ddof=1))
+            avg["sharpe"] = round((float(np.mean(r_q1)) - 0.05) / q1_std, 6) if q1_std > 1e-10 else 0.0
+            cum = np.cumprod(1 + r_q1)
+            peak = np.maximum.accumulate(cum)
+            avg["max_drawdown"] = round(float(np.min((cum - peak) / peak)), 6)
+        else:
+            avg["cagr"] = None
+            avg["sharpe"] = None
+            avg["max_drawdown"] = None
+
     return model_name, fold_metrics, avg, fi
 
 
-def run_pipeline(df, on_progress=None, max_workers=2):
+def run_pipeline(df, on_progress=None, max_workers=3):
     """Run all models with parallel training. Returns (comparison, per_quarter, feature_importances)."""
     df = df.copy()
     df["label"] = (df["forward_return_rank"] >= 50).astype(int)
@@ -156,9 +206,21 @@ def run_pipeline(df, on_progress=None, max_workers=2):
             all_pq.extend(fold_metrics)
 
     comp_df = pd.DataFrame(comparison)
-    pq_cols = ["model", "feature_set", "quarter"] + METRIC_KEYS
+    pq_cols = ["model", "feature_set", "quarter"] + METRIC_KEYS + ["portfolio_return"]
     pq_df = pd.DataFrame(all_pq)
     pq_df = pq_df[[c for c in pq_cols if c in pq_df.columns]]
+
+    # equal-weight market benchmark (average return of all stocks each quarter)
+    if "forward_return" in df.columns:
+        bench = []
+        for q in quarters[MIN_TRAIN_PERIODS:]:
+            avg_ret = df.loc[df["quarter"] == q, "forward_return"].mean()
+            if np.isfinite(avg_ret):
+                bench.append({"model": "Market", "feature_set": "Benchmark",
+                              "quarter": q, "portfolio_return": float(avg_ret)})
+        if bench:
+            pq_df = pd.concat([pq_df, pd.DataFrame(bench)], ignore_index=True)
+
     return comp_df, pq_df, layer_c_models
 
 

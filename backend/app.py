@@ -30,7 +30,8 @@ def _df_records(key):
     df = state[key]
     if df is None:
         return JSONResponse({"error": "No results yet"}, 400)
-    return df.where(pd.notna(df), None).to_dict(orient="records")
+    # use pandas to_json to safely handle numpy types, then parse back for JSONResponse
+    return JSONResponse(json.loads(df.to_json(orient="records")))
 
 
 @app.get("/api/files")
