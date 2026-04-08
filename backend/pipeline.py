@@ -45,7 +45,7 @@ MODELS = [
 METRIC_KEYS = [
     "accuracy", "precision", "recall", "f1", "roc_auc",
     "spearman_ic", "ndcg_at_k", "precision_at_k",
-    "mean_annual_return", "std_annual_return",
+    "mean_quarterly_return", "std_quarterly_return",
     "cagr", "sharpe", "max_drawdown",
 ]
 
@@ -53,7 +53,7 @@ METRIC_LABELS = {
     "accuracy": "Accuracy", "precision": "Precision", "recall": "Recall",
     "f1": "F1 Score", "roc_auc": "ROC AUC", "spearman_ic": "Spearman IC",
     "ndcg_at_k": "NDCG@30", "precision_at_k": "Precision@30",
-    "mean_annual_return": "Mean Ann. Return", "std_annual_return": "Std Ann. Return",
+    "mean_quarterly_return": "Mean Qtr. Return", "std_quarterly_return": "Std Qtr. Return",
     "cagr": "CAGR", "sharpe": "Sharpe", "max_drawdown": "Max Drawdown",
 }
 
@@ -140,7 +140,7 @@ def _train_one_model(args):
         # Average classification/ranking metrics across folds.
         # Skip portfolio metrics — they are computed separately below.
         portfolio_keys = {"cagr", "sharpe", "max_drawdown",
-                          "mean_annual_return", "std_annual_return"}
+                          "mean_quarterly_return", "std_quarterly_return"}
         for k in METRIC_KEYS:
             if k in portfolio_keys:
                 continue
@@ -150,29 +150,32 @@ def _train_one_model(args):
                 avg[k] = round(float(vals.mean()), 6) if len(vals) > 0 else None
         avg["n_folds"] = len(fold_metrics)
 
-        # Portfolio metrics.  forward_return is a 12-month return, so each
-        # fold's portfolio_return is already annual-scale.  Consecutive folds
-        # overlap (~9 months), so we report simple stats from all folds and
-        # compute CAGR/Sharpe/Drawdown from non-overlapping Q1-only folds.
+        # Portfolio metrics.  forward_return is a 1-QUARTER return (TRI shift(-1)).
+        # Each fold's portfolio_return is the average quarterly return of the top-N picks.
         all_rets = [m["portfolio_return"] for m in fold_metrics
                     if m.get("portfolio_return") is not None
                     and np.isfinite(m["portfolio_return"])]
         if len(all_rets) >= 2:
             r = np.array(all_rets)
-            avg["mean_annual_return"] = round(float(np.mean(r)), 6)
-            avg["std_annual_return"] = round(float(np.std(r, ddof=1)), 6)
+            avg["mean_quarterly_return"] = round(float(np.mean(r)), 6)
+            avg["std_quarterly_return"] = round(float(np.std(r, ddof=1)), 6)
 
-        # Non-overlapping annual returns (Q1 folds only) for CAGR/Sharpe/Drawdown
-        q1_rets = [m["portfolio_return"] for m in fold_metrics
-                   if m.get("portfolio_return") is not None
-                   and m.get("quarter", "").endswith("Q1")
-                   and np.isfinite(m["portfolio_return"])]
-        if len(q1_rets) >= 2:
-            r_q1 = np.array(q1_rets)
-            avg["cagr"] = round(float(np.prod(1 + r_q1) ** (1 / len(r_q1)) - 1), 6)
-            q1_std = float(np.std(r_q1, ddof=1))
-            avg["sharpe"] = round((float(np.mean(r_q1)) - 0.05) / q1_std, 6) if q1_std > 1e-10 else 0.0
-            cum = np.cumprod(1 + r_q1)
+        # CAGR, Sharpe, Max Drawdown from ALL quarterly returns (sequential equity curve).
+        if len(all_rets) >= 4:
+            r_all = np.array(all_rets)
+            n_quarters = len(r_all)
+            n_years = n_quarters / 4.0
+            # CAGR: compound all quarterly returns, then annualize
+            cum_total = np.prod(1 + r_all)
+            avg["cagr"] = round(float(cum_total ** (1 / n_years) - 1), 6)
+            # Sharpe: annualize quarterly mean and std
+            q_mean = float(np.mean(r_all))
+            q_std = float(np.std(r_all, ddof=1))
+            ann_mean = q_mean * 4
+            ann_std = q_std * np.sqrt(4)
+            avg["sharpe"] = round((ann_mean - 0.05) / ann_std, 6) if ann_std > 1e-10 else 0.0
+            # Max Drawdown: full quarterly equity curve
+            cum = np.cumprod(1 + r_all)
             peak = np.maximum.accumulate(cum)
             avg["max_drawdown"] = round(float(np.min((cum - peak) / peak)), 6)
         else:

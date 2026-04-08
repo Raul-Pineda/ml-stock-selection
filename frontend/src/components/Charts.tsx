@@ -63,6 +63,89 @@ export function ICTimeseries({ data }: { data: PerQuarterRow[] }) {
   );
 }
 
+export function CumulativeReturns({ data }: { data: PerQuarterRow[] }) {
+  // group by model+layer, then cumulate quarterly returns into growth-of-$1
+  const groups = new Map<string, PerQuarterRow[]>();
+  for (const row of data) {
+    if (row.portfolio_return == null) continue;
+    const key = `${row.model} ${row.feature_set}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(row);
+  }
+
+  const palette = ["#2563EB", "#34D399", "#FBBF24", "#F87171", "#A78BFA"];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const traces: any[] = [];
+  let ci = 0;
+
+  for (const [label, rows] of groups) {
+    const sorted = rows.sort((a, b) => a.quarter.localeCompare(b.quarter));
+    let cum = 1;
+    const qs: string[] = [], vals: number[] = [];
+    for (const r of sorted) {
+      cum *= 1 + (Number(r.portfolio_return) || 0);
+      qs.push(r.quarter);
+      vals.push(cum);
+    }
+    const isBenchmark = label.includes("Benchmark");
+    traces.push({
+      type: "scatter" as const, mode: "lines" as const, name: label,
+      x: qs, y: vals,
+      line: {
+        color: isBenchmark ? "#6B7280" : palette[ci % palette.length],
+        width: isBenchmark ? 1.5 : 2,
+        dash: isBenchmark ? "dot" : "solid",
+      },
+    });
+    if (!isBenchmark) ci++;
+  }
+
+  return (
+    <Plot
+      data={traces}
+      layout={{ ...DARK,
+        xaxis: { ...GRID, tickangle: -45, tickfont: { size: 8 } },
+        yaxis: { ...GRID, title: "Growth of $1" },
+        margin: { t: 20, b: 60, l: 60, r: 20 }, height: 350,
+        legend: { orientation: "h", y: 1.18, font: { size: 9 } },
+        shapes: [{ type: "line", x0: 0, x1: 1, xref: "paper",
+          y0: 1, y1: 1, line: { color: "#333", dash: "dot", width: 1 } }],
+      }}
+      {...PLOT}
+    />
+  );
+}
+
+export function RiskSummary({ data }: { data: ComparisonRow[] }) {
+  const fmt = (v: number | null, pct = false) => {
+    if (v == null) return "–";
+    return pct ? `${(v * 100).toFixed(1)}%` : v.toFixed(2);
+  };
+
+  return (
+    <table className="w-full text-xs font-mono">
+      <thead>
+        <tr className="border-b border-[var(--color-border)]">
+          {["Model", "Layer", "CAGR", "Sharpe", "Max Drawdown"].map((h) => (
+            <th key={h} className={`px-3 py-2 text-[var(--color-text-dim)] font-medium ${h === "Model" || h === "Layer" ? "text-left" : "text-right"}`}>{h}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {data.map((row, i) => (
+          <tr key={i} className="border-b border-[var(--color-border)]/50">
+            <td className="px-3 py-1.5">{row.model}</td>
+            <td className="px-3 py-1.5">{row.feature_set}</td>
+            <td className="px-3 py-1.5 text-right">{fmt(row.cagr, true)}</td>
+            <td className="px-3 py-1.5 text-right">{fmt(row.sharpe)}</td>
+            <td className="px-3 py-1.5 text-right text-[var(--color-negative)]">{fmt(row.max_drawdown, true)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
 export function FeatureImportanceChart({ data }: { data: Record<string, FeatureImportance> }) {
   const entries = Object.entries(data);
   if (!entries.length) return null;

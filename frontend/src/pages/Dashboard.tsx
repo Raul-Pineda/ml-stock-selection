@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 import { downloadXlsx, fetchComparison, fetchFeatures, fetchPerQuarter, trainModels } from "../api/client";
-import { FeatureImportanceChart, ICTimeseries, MetricBars } from "../components/Charts";
+import { CumulativeReturns, FeatureImportanceChart, ICTimeseries, MetricBars, RiskSummary } from "../components/Charts";
 import ComparisonTable from "../components/ComparisonTable";
 import Layout from "../components/Layout";
 import Progress from "../components/Progress";
@@ -89,6 +89,14 @@ export default function Dashboard({ schema }: { schema: Schema | null }) {
               <FeatureImportanceChart data={features} />
             </Section>
           )}
+          {perQuarter.length > 0 && (
+            <Section title="Cumulative Portfolio Returns" padded>
+              <CumulativeReturns data={perQuarter} />
+            </Section>
+          )}
+          <Section title="Risk Metrics">
+            <RiskSummary data={comparison} />
+          </Section>
         </div>
       )}
     </Layout>

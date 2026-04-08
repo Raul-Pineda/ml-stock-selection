@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT))
 import pandas as pd
 from backend.pipeline import METRIC_LABELS, build_excel, run_pipeline
 
-DATA_PATH = ROOT / "src" / "data" / "processed" / "ml_ready_simfin.csv"
+DATA_PATH = ROOT / "data" / "processed" / "ml_ready.csv"
 RESULTS_DIR = ROOT / "src" / "results"
 
 
