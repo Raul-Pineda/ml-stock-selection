@@ -28,3 +28,7 @@ venv/
 
 # Results are committed (small CSVs + JSON)
 # results/
+
+# Test suite (local-only, never commit)
+tests/
+pytest.ini
